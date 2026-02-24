@@ -27,6 +27,10 @@ class RolloutBuffer:
         self.log_probs.append(log_prob)
         self.dones.append(done)
 
+    def get_raw_data(self):
+        return (np.array(self.states), np.array(self.actions), np.array(self.values),\
+            np.array(self.rewards), np.array(self.log_probs), np.array(self.dones))
+
     def generate_batches(self):
         n_states = len(self.states)
         idxs = np.arange(n_states, dtype=np.int32)

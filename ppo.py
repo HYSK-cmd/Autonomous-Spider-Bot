@@ -10,19 +10,20 @@ import numpy as np
 import random
 
 class PPOAgent:
-    def __init__(self, state_dim:int, action_dim:int, buffer_size:int, gamma:float=0.99, gae_lambda:float=0.95, lr:float=3e-4):
+    def __init__(self, state_dim:int, action_dim:int, buffer_size:int, hidden_size:int=128, gamma:float=0.99, gae_lambda:float=0.95, lr:float=3e-4):
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # env
+        # Intialize gym env
         self.env = None
 
-        # Actor-Critic
-        self.actor = Actor(in_dim=state_dim, out_dim=action_dim, hidden_size=128).to(self.device)
-        self.critic = Critic(in_dim=state_dim, out_dim=1, hidden_size=128).to(self.device)
+        # Initialize Actor-Critic Network
+        self.actor = Actor(in_dim=state_dim, out_dim=action_dim, hidden_size=hidden_size).to(self.device)
+        self.critic = Critic(in_dim=state_dim, out_dim=1, hidden_size=hidden_size).to(self.device)
 
-        # Buffer
+        # Initialize Rollout Buffer
         self.memory = RolloutBuffer(obs_dim=state_dim, act_dim=action_dim, batch_size=32)
+        self.buffer_size = buffer_size
 
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
@@ -37,35 +38,34 @@ class PPOAgent:
         # Variables
         self.gamma = gamma
         self.gae_lambda = gae_lambda
-        self.epochs = 10
+        self.epochs = 30
         self.policy_clip = 0.2
         self.value_clip = 0.2 
-        # buffer size
-        self.buffer_size = buffer_sizeS
+
+    def forward_pass(self, state, action=None, eps=1e-6):
+        mean = self.actor(state)
+        log_std = torch.clamp(self.actor.log_std, -5, 2)
+        std = torch.exp(log_std)
+        dist = Independent(Normal(mean, std), 1)
+
+        if action is None:
+            action = dist.rsample()
+
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy().mean()
+        value = self.critic(state)
+        return action, log_prob, value, entropy
 
     def select_action(self, state):
-        device = self.device
         if isinstance(state, np.ndarray):
-            state = torch.from_numpy(state).float().to(device).unsqueeze(0)  
+            state = torch.from_numpy(state).float().to(self.device).unsqueeze(0)  
         else:
-            state = state.to(device).unsqueeze(0) 
+            state = state.to(self.device).unsqueeze(0) 
+
         with torch.no_grad():
-            mean = self.actor(state)
-            value = self.critic(state)
+            action, log_prob, value, _ = self.forward_pass(state)
 
-            log_std = torch.clamp(self.actor.log_std, -5, 2)
-            std = torch.exp(log_std)
-            #std = torch.exp(self.actor.log_std)
-            dist = Independent(Normal(mean, std), 1) 
-
-            u = dist.rsample() 
-            action = torch.tanh(u)       
-            #log_prob = dist.log_prob(u) - log_det
-            log_det = torch.sum(torch.log(1.0 - action.pow(2) + 1e-6), dim=-1)
-            #action = torch.clamp(dist.sample(), -1, 1)
-            #log_prob = dist.log_prob(action)
-            log_prob = dist.log_prob(u) - log_det
-        return action.squeeze(0).cpu(), log_prob.squeeze(0).cpu(), value.cpu()
+        return action.squeeze(0).cpu(), log_prob.squeeze(0).cpu(), value.squeeze().cpu()
 
     def collect_rollout(self, env, state):
         episode_rewards = []
@@ -98,8 +98,8 @@ class PPOAgent:
         return state, episode_rewards
 
 
-    def compute_gae_lambda(self):
-        _, _, values, rewards, _, dones, _ = self.memory.generate_batches()
+    def calculate_advantage_gae(self):
+        values, rewards, dones = self.memory.get_raw_data_for_gae()
         values = torch.tensor(np.asarray(values, dtype=np.float32).reshape(-1), device=self.device)
         rewards = torch.tensor(np.asarray(rewards, dtype=np.float32).reshape(-1), device=self.device)
         dones = torch.tensor(np.asarray(dones, dtype=np.float32).reshape(-1), device=self.device)
@@ -115,24 +115,20 @@ class PPOAgent:
             last_value = torch.tensor(0.0, device=self.device)
 
         for t in reversed(range(T)):
+            mask = 1 - dones[t]
             if t == T-1:
                 next_value = last_value
             else:
-                next_value = values[t+1] * (1 - dones[t]) 
-            delta = rewards[t] + self.gamma * next_value - values[t]
-            gae = delta + self.gamma * self.gae_lambda * (1 - dones[t]) * gae
-            advantages[t] = gae
+                next_value = values[t+1]
+
+            td_residual = rewards[t] + self.gamma * next_value * mask - values[t]
+            at_gae = td_residual + self.gamma * self.gae_lambda * mask * gae
+            advantages[t] = at_gae
+            gae = at_gae
+            gae = at_gae
+
         returns = advantages + values
         return advantages, returns
-    
-    def forward_pass(self, state, action, eps=1e-6):
-        mean = self.actor(state)
-        std = torch.exp(self.actor.log_std)
-        dist = Independent(Normal(mean, std), 1)
-        new_log_prob = dist.log_prob(action)
-        entropy = dist.entropy().mean()
-        value = self.critic(state)
-        return new_log_prob, value, entropy
 
     def ppo_update(self):
         states, actions, values, rewards, log_probs, dones, batches = self.memory.generate_batches()
@@ -142,7 +138,7 @@ class PPOAgent:
         log_probs = torch.as_tensor(log_probs, dtype=torch.float32, device=self.device).view(-1)
         values = torch.as_tensor(values, dtype=torch.float32, device=self.device).view(-1)
 
-        advantages, returns = self.compute_gae_lambda()
+        advantages, returns = self.calculate_advantage_gae()
         advantages = advantages.detach()
         returns = returns.detach()
         
@@ -160,19 +156,16 @@ class PPOAgent:
                 old_log_prob = log_probs[idx]
                 ret = returns[idx]
                 advantage = advantages[idx]
-                old_value = values[idx]
 
-                new_log_prob, old_value, entropy = self.forward_pass(state, action)
+                _, new_log_prob, value, entropy = self.forward_pass(state, action)
 
-                value = self.critic(state)
-
-                ratio = torch.exp(new_log_prob - old_log_prob.detach())
-                surr1 = ratio * advantage
-                surr2 = torch.clamp(ratio, 1-self.policy_clip, 1+self.policy_clip) * advantage
+                r = torch.exp(new_log_prob - old_log_prob.detach())
+                surr1 = r * advantage
+                surr2 = torch.clamp(r, 1-self.policy_clip, 1+self.policy_clip) * advantage
                 
-                actor_loss = -torch.min(surr1, surr2).mean()
-                critic_loss = nn.MSELoss()(value, ret)
+                actor_loss = -torch.min(surr1, surr2).mean() # gradient ascent
                 actor_loss = actor_loss - 0.0001 * entropy
+                critic_loss = nn.MSELoss()(value.squeeze(-1), ret)
 
                 epoch_actor_losses.append(actor_loss.item())
                 epoch_critic_losses.append(critic_loss.item())
@@ -187,6 +180,3 @@ class PPOAgent:
         
         self.memory.reset()
         return np.mean(epoch_actor_losses), np.mean(epoch_critic_losses)
-
-                
-
