@@ -67,35 +67,35 @@ class PPOAgent:
 
         return action.squeeze(0).cpu(), log_prob.squeeze(0).cpu(), value.squeeze().cpu()
 
-    def collect_rollout(self, env, state):
-        episode_rewards = []
-        current_episode_reward = 0.0
+    # def collect_rollout(self, env, state):
+    #     episode_rewards = []
+    #     current_episode_reward = 0.0
         
-        for _ in range(self.buffer_size):
-            action, log_prob, value = self.select_action(state)
-            action = action.numpy()
-            next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            reward, done = np.float32(reward), np.float32(done)
-            self.memory.store(state, action, value.numpy(), reward, log_prob.numpy(), done)
+    #     for _ in range(self.buffer_size):
+    #         action, log_prob, value = self.select_action(state)
+    #         action = action.numpy()
+    #         next_state, reward, terminated, truncated, info = env.step(action)
+    #         done = terminated or truncated
+    #         reward, done = np.float32(reward), np.float32(done)
+    #         self.memory.store(state, action, value.numpy(), reward, log_prob.numpy(), done)
             
-            current_episode_reward += reward
-            state = next_state
+    #         current_episode_reward += reward
+    #         state = next_state
             
-            if done:
-                episode_rewards.append(current_episode_reward)
-                current_episode_reward = 0.0
-                state, info = env.reset()
-                self.last_state = None
-                self.last_done = True
-            else:
-                self.last_state = next_state
-                self.last_done = done
+    #         if done:
+    #             episode_rewards.append(current_episode_reward)
+    #             current_episode_reward = 0.0
+    #             state, info = env.reset()
+    #             self.last_state = None
+    #             self.last_done = True
+    #         else:
+    #             self.last_state = next_state
+    #             self.last_done = done
         
-        if current_episode_reward > 0:
-            episode_rewards.append(current_episode_reward)
+    #     if current_episode_reward > 0:
+    #         episode_rewards.append(current_episode_reward)
         
-        return state, episode_rewards
+    #     return state, episode_rewards
 
 
     def calculate_advantage_gae(self):
@@ -124,7 +124,6 @@ class PPOAgent:
             td_residual = rewards[t] + self.gamma * next_value * mask - values[t]
             at_gae = td_residual + self.gamma * self.gae_lambda * mask * gae
             advantages[t] = at_gae
-            gae = at_gae
             gae = at_gae
 
         returns = advantages + values
