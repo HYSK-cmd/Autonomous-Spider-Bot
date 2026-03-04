@@ -26,7 +26,7 @@ if MODE == "train":
     print("Training starts")
 
     state, info = env.reset()
-    num_episodes = 200  # 100 → 200 (2배 훈련)
+    num_episodes = 50  # 100 → 200 (2배 훈련)
 
     for episode in range(num_episodes):
         state, rollout_episode_rewards = agent.collect_rollout(env, state)

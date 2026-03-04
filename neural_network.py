@@ -1,43 +1,56 @@
 import torch
 import torch.nn as nn
+from torch.distributions import Normal
 import numpy as np
+import os
+
+DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
 class Actor(nn.Module):
-    def __init__(self, in_dim:int, out_dim:int, hidden_size:int, log_std:float=0.5, init_w:float=1e-3):
-        super().__init__()
-
-        self.input = nn.Sequential(
+    def __init__(self, in_dim:int, out_dim:int, hidden_size:int=256):
+        super(Actor, self).__init__()
+        
+        self.checkpoint_file = os.path.join(DIR_PATH, "actor_torch_ppo.pth")
+        self.actor = nn.Sequential(
             nn.Linear(in_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
+            nn.Linear(hidden_size, out_dim)
         )
-        self.out = nn.Linear(hidden_size, out_dim)
-        self.out.weight.data.uniform_(-init_w, init_w)
-        self.out.bias.data.uniform_(-init_w, init_w)
 
-        self.log_std = nn.Parameter(torch.ones(1, out_dim) * log_std)
+        self.log_std = nn.Parameter(torch.zeros(out_dim))
     
     def forward(self, state) -> torch.Tensor:
-        output = self.input(state)
-        output = self.out(output)
-        return output 
+        mean = self.actor(state)
+        std = torch.exp(self.log_std)
+        dist = Normal(mean, std)
+        return dist
+
+    def save_checkpoint(self):
+        torch.save(self.state_dict(), self.checkpoint_file)
+
+    def load_checkpoint(self):
+        self.load_state_dict(torch.load(self.checkpoint_file))
 
 class Critic(nn.Module):
-    def __init__(self, in_dim:int, out_dim:int, hidden_size:int, std:float=0.0, init_w:float=3e-3):
-        super().__init__()
+    def __init__(self, in_dim:int, hidden_size:int=256, std:float=0.0):
+        super(Critic, self).__init__()
 
-        self.input = nn.Sequential(
+        self.checkpoint_file = os.path.join(DIR_PATH, "critic_torch_ppo.pth")
+        self.critic = nn.Sequential(
             nn.Linear(in_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
+            nn.Linear(hidden_size, 1),
         )
-        self.out = nn.Linear(hidden_size, out_dim)
-        self.out.weight.data.uniform_(-init_w, init_w)
-        self.out.bias.data.zero_()
 
     def forward(self, state):
-        output = self.input(state)
-        output = self.out(output)
-        return output 
+        return self.critic(state)
+
+    def save_checkpoint(self):
+        torch.save(self.state_dict(), self.checkpoint_file)
+
+    def load_checkpoint(self):
+        self.load_state_dict(torch.load(self.checkpoint_file))

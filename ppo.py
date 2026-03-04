@@ -1,32 +1,51 @@
+#===== Import files =====#
 from neural_network import Actor, Critic
-from roll_out_buffer import RolloutBuffer
-
+from rollout_buffer import RolloutBuffer
+#===== PyTorch tools =====#
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Normal, Independent
-
+#===== Tools =====#
 import numpy as np
 import random
+import os, sys
+import yaml
+#===== Initialize SAVE LOG PATH =====#
+DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 
+#===== PPOAgent =====#
 class PPOAgent:
-    def __init__(self, state_dim:int, action_dim:int, buffer_size:int, hidden_size:int=128, gamma:float=0.99, gae_lambda:float=0.95, lr:float=3e-4):
+    def __init__(self, n_inputs, n_actions):
+        # log file path
+        self.log_file = os.path.join(DIR_PATH, "latest.pth")
+        self.best_one = os.path.join(DIR_PATH, "best.pth")
+        # initialize config file
+        self.config_file = os.path.join(DIR_PATH, "config.yaml")
+
+        # load const variables
+        self.config = self.load_config(self.config_file)
+
+        # Variables
+        self.lr = self.config["learning_rate"]
+        self.gamma = self.config["gamma"]
+        self.gae_lambda = self.config["gae_lambda"]
+        self.epochs = self.config["n_epochs"]
+        self.entropy_coef = self.config["entropy_coef"]
+        self.policy_clip = self.config["clip_epsilon"]
+        self.value_clip = self.config["clip_epsilon"]
+        self.batch_size = self.config["batch_size"]
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Intialize gym env
-        self.env = None
 
         # Initialize Actor-Critic Network
-        self.actor = Actor(in_dim=state_dim, out_dim=action_dim, hidden_size=hidden_size).to(self.device)
-        self.critic = Critic(in_dim=state_dim, out_dim=1, hidden_size=hidden_size).to(self.device)
+        self.actor = Actor(in_dim=n_inputs, out_dim=n_actions).to(self.device)
+        self.critic = Critic(in_dim=n_inputs).to(self.device)
 
         # Initialize Rollout Buffer
-        self.memory = RolloutBuffer(obs_dim=state_dim, act_dim=action_dim, batch_size=32)
-        self.buffer_size = buffer_size
+        self.memory = RolloutBuffer(obs_dim=n_inputs, act_dim=n_actions, batch_size=32)
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
 
         # total_steps
         self.total_step = 0
@@ -35,89 +54,87 @@ class PPOAgent:
         self.last_state = None
         self.last_done = None
 
-        # Variables
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
-        self.epochs = 30
-        self.policy_clip = 0.2
-        self.value_clip = 0.2 
+        self._try_load_checkpoint()
 
+    #===== Load const variables =====#
+    @staticmethod
+    def load_config(path: str) -> dict:
+        with open(path, "r") as f:
+            return yaml.safe_load(f)
+    #=====  =====#
+    def save_checkpoint(self):
+        checkpoint = {"actor_state" : self.actor.state_dict(), "critic_state" : self.critic.state_dict()}
+        torch.save(checkpoint, self.log_file)
+        self.actor.save_checkpoint()
+        self.critic.save_checkpoint()
+
+    def save_best_checkpoint(self):
+        checkpoint = {"actor_state" : self.actor.state_dict(), "critic_state" : self.critic.state_dict()}
+        torch.save(checkpoint, self.best_one)
+    #=====  =====#
+    def load_checkpoint(self):
+        checkpoint = torch.load(self.log_file, map_location=self.device)
+        self.actor.load_state_dict(checkpoint["actor_state"])
+        self.critic.load_state_dict(checkpoint["critic_state"])
+
+    def _try_load_checkpoint(self):
+        for checkpoint_path in [self.best_one, self.log_file]:
+            if os.path.exists(checkpoint_path):
+                try:
+                    checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                    self.actor.load_state_dict(checkpoint["actor_state"])
+                    self.critic.load_state_dict(checkpoint["critic_state"])
+                    return
+                except Exception:
+                    continue
+    #=====  =====#
     def forward_pass(self, state, action=None, eps=1e-6):
-        mean = self.actor(state)
-        log_std = torch.clamp(self.actor.log_std, -5, 2)
-        std = torch.exp(log_std)
-        dist = Independent(Normal(mean, std), 1)
-
+        dist = self.actor(state)
         if action is None:
             action = dist.rsample()
-
-        log_prob = dist.log_prob(action)
-        entropy = dist.entropy().mean()
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1).mean()
         value = self.critic(state)
         return action, log_prob, value, entropy
-
+        
+    #=====  =====#
     def select_action(self, state):
+        # convert to torch if state is a numpy array
         if isinstance(state, np.ndarray):
-            state = torch.from_numpy(state).float().to(self.device).unsqueeze(0)  
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         else:
-            state = state.to(self.device).unsqueeze(0) 
+            state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.no_grad():
             action, log_prob, value, _ = self.forward_pass(state)
-
-        return action.squeeze(0).cpu(), log_prob.squeeze(0).cpu(), value.squeeze().cpu()
-
-    # def collect_rollout(self, env, state):
-    #     episode_rewards = []
-    #     current_episode_reward = 0.0
-        
-    #     for _ in range(self.buffer_size):
-    #         action, log_prob, value = self.select_action(state)
-    #         action = action.numpy()
-    #         next_state, reward, terminated, truncated, info = env.step(action)
-    #         done = terminated or truncated
-    #         reward, done = np.float32(reward), np.float32(done)
-    #         self.memory.store(state, action, value.numpy(), reward, log_prob.numpy(), done)
-            
-    #         current_episode_reward += reward
-    #         state = next_state
-            
-    #         if done:
-    #             episode_rewards.append(current_episode_reward)
-    #             current_episode_reward = 0.0
-    #             state, info = env.reset()
-    #             self.last_state = None
-    #             self.last_done = True
-    #         else:
-    #             self.last_state = next_state
-    #             self.last_done = done
-        
-    #     if current_episode_reward > 0:
-    #         episode_rewards.append(current_episode_reward)
-        
-    #     return state, episode_rewards
-
-
+            action = torch.tanh(action)
+        return (action.squeeze(0).detach().cpu().numpy(), log_prob.squeeze(0).detach().cpu().numpy(), value.squeeze(0).detach().cpu().numpy())
+    #=====  =====#
     def calculate_advantage_gae(self):
-        values, rewards, dones = self.memory.get_raw_data_for_gae()
-        values = torch.tensor(np.asarray(values, dtype=np.float32).reshape(-1), device=self.device)
-        rewards = torch.tensor(np.asarray(rewards, dtype=np.float32).reshape(-1), device=self.device)
-        dones = torch.tensor(np.asarray(dones, dtype=np.float32).reshape(-1), device=self.device)
+        # get raw data from rollout buffer
+        _, _, values, rewards, _, dones = self.memory.get_raw_data()
+        values = values.view(-1)
 
+        # get the size of rewards tensor
         T = rewards.shape[0]
-        gae = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+
+        # initialize advantages and gae
+        gae = torch.as_tensor(0.0, dtype=torch.float32, device=self.device)
         advantages = torch.zeros(T, dtype=torch.float32, device=self.device)
 
-        if not bool(self.last_done):
-            with torch.no_grad():
-                last_value = self.critic(torch.from_numpy(self.last_state).float().to(self.device)).view(-1)[0].detach()
+        # calculate the bootstrap value of the last trajectory
+        self.last_done = dones[-1]
+        if bool(self.last_done) or (self.last_state is None):
+            next_value = torch.tensor(0.0, device=self.device)
         else:
-            last_value = torch.tensor(0.0, device=self.device)
+            with torch.no_grad():
+                self.last_state = torch.as_tensor(self.last_state, dtype=torch.float32, device=self.device)
+                next_value = self.critic(self.last_state).to(self.device)
 
         for t in reversed(range(T)):
             mask = 1 - dones[t]
             if t == T-1:
-                next_value = last_value
+                next_value = next_value.reshape(-1)[0]
             else:
                 next_value = values[t+1]
 
@@ -128,7 +145,7 @@ class PPOAgent:
 
         returns = advantages + values
         return advantages, returns
-
+    #=====  =====#
     def ppo_update(self):
         states, actions, values, rewards, log_probs, dones, batches = self.memory.generate_batches()
         
@@ -142,7 +159,6 @@ class PPOAgent:
         returns = returns.detach()
         
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
         # for record
         epoch_actor_losses = []
@@ -163,7 +179,7 @@ class PPOAgent:
                 surr2 = torch.clamp(r, 1-self.policy_clip, 1+self.policy_clip) * advantage
                 
                 actor_loss = -torch.min(surr1, surr2).mean() # gradient ascent
-                actor_loss = actor_loss - 0.0001 * entropy
+                actor_loss = actor_loss - self.entropy_coef * entropy
                 critic_loss = nn.MSELoss()(value.squeeze(-1), ret)
 
                 epoch_actor_losses.append(actor_loss.item())
