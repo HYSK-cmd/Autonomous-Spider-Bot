@@ -5,8 +5,8 @@ import torch
 from ppo import PPOAgent
 import os
 
-# ===== 모드 선택 =====
-MODE = "train"  # "train" 또는 "test" ← 다시 훈련하세요!
+# ===== Mode Selection =====
+MODE = "train"  # "train" or "test"
 MODEL_PATH = "trained_models"
 os.makedirs(MODEL_PATH, exist_ok=True)
 
@@ -17,7 +17,7 @@ action_dim = env.action_space.shape[0]
 
 agent = PPOAgent(state_dim=state_dim, action_dim=action_dim, buffer_size=1024)
 
-# ===== 훈련 모드 =====
+# Training Mode
 if MODE == "train":
     episode_rewards = []
     actor_losses = []
@@ -26,7 +26,7 @@ if MODE == "train":
     print("Training starts")
 
     state, info = env.reset()
-    num_episodes = 50  # 100 → 200 (2배 훈련)
+    num_episodes = 50  # 100 → 200 (2x training)
 
     for episode in range(num_episodes):
         state, rollout_episode_rewards = agent.collect_rollout(env, state)
@@ -41,14 +41,14 @@ if MODE == "train":
 
     env.close()
 
-    print("\nDone Training!")
+    print("\nDone Training")
     
-    # 모델 저장
+    # Save model
     torch.save(agent.actor.state_dict(), f'{MODEL_PATH}/actor.pt')
     torch.save(agent.critic.state_dict(), f'{MODEL_PATH}/critic.pt')
-    print(f"✓ 모델 저장 완료: {MODEL_PATH}/")
+    print(f"Model saved: {MODEL_PATH}/")
 
-    # 그래프 저장
+    # Save graph
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
     axes[0].plot(episode_rewards, label='Episode Reward', color='blue', marker='o')
@@ -70,28 +70,27 @@ if MODE == "train":
     plt.savefig('training_progress.png', dpi=150)
     plt.close()
 
-# ===== 테스트 모드 (비디오 생성) =====
+# ===== Test Mode (Create Video) =====
 else:
     print("Loading trained model...")
     agent.actor.load_state_dict(torch.load(f'{MODEL_PATH}/actor.pt'))
     agent.critic.load_state_dict(torch.load(f'{MODEL_PATH}/critic.pt'))
-    print("✓ 모델 로드 완료")
+    print("✓ Model loaded")
 
-# ===== 영상 녹화 =====
+# ===== Video Recording =====
 video_folder = "videos/ppo"
 os.makedirs(video_folder, exist_ok=True)
 
-print("\n영상 녹화 시도 중...")
+print("\nAttempting video recording...")
 try:
     from gymnasium.wrappers import RecordVideo
     env_video = gym.make('LunarLanderContinuous-v3', render_mode='rgb_array')
     env_video = RecordVideo(env_video, video_folder=video_folder, 
-                           episode_trigger=lambda x: x < 5,  # 5개 에피소드 녹화
+                           episode_trigger=lambda x: x < 5,  # record 5 episodes
                            name_prefix='ppo_', disable_logger=True)
 
     total_reward = 0
     
-    # 5개 에피소드 실행
     for ep in range(5):
         state, info = env_video.reset()
         episode_reward = 0
@@ -105,17 +104,17 @@ try:
             episode_reward += reward
             
             if terminated or truncated:
-                print(f"  - Episode {ep+1} 보상: {episode_reward:.2f}")
+                print(f"  - Episode {ep+1} reward: {episode_reward:.2f}")
                 total_reward += episode_reward
                 break
 
     env_video.close()
-    print(f"✓ 영상 저장 완료: {video_folder}/")
-    print(f"평균 보상: {total_reward/5:.2f}")
+    print(f"Video saved: {video_folder}/")
+    print(f"Average reward: {total_reward/5:.2f}")
     
 except Exception as e:
-    print(f"✗ 영상 저장 실패: {type(e).__name__}: {str(e)}")
-    print("  에이전트 성능 테스트 진행 중...")
+    print(f"Video save failed: {type(e).__name__}: {str(e)}")
+    print("  Running agent performance test...")
     
     try:
         env_test = gym.make('LunarLanderContinuous-v3')
@@ -134,6 +133,6 @@ except Exception as e:
                 break
         
         env_test.close()
-        print(f"✓ 테스트 완료 | 에피소드 보상: {episode_reward:.2f}")
+        print(f"Test complete | Episode reward: {episode_reward:.2f}")
     except Exception as e2:
-        print(f"✗ 테스트 실패: {type(e2).__name__}: {str(e2)}")
+        print(f"Test failed: {type(e2).__name__}: {str(e2)}")
