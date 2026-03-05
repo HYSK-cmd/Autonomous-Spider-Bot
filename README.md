@@ -4,5 +4,5 @@ Tested in 3D simulation via PyBullet
 
 ### How to install
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/HYSK-cmd/Autonomous-Spider-Bot.git
 pip install -r requirements.txt
