@@ -1,6 +1,6 @@
 #===== Import files =====#
-from neural_network import Actor, Critic
-from rollout_buffer import RolloutBuffer
+from .neural_network import Actor, Critic
+from .rollout_buffer import RolloutBuffer
 #===== PyTorch tools =====#
 import torch
 import torch.nn as nn
@@ -12,13 +12,20 @@ import os, sys
 import yaml
 #===== Initialize SAVE LOG PATH =====#
 DIR_PATH = os.path.dirname(os.path.abspath(__file__))
+try:
+    LOG_PATH = os.path.join(DIR_PATH, "logs")
+    os.makedirs(LOG_PATH, exist_ok=True)
+    SAVE_PATH = os.path.join(DIR_PATH, LOG_PATH)
+except OSError as e:
+    print(f"Failed creating a directory\n")
 
 #===== PPOAgent =====#
 class PPOAgent:
     def __init__(self, n_inputs, n_actions):
         # log file path
-        self.log_file = os.path.join(DIR_PATH, "latest.pth")
-        self.best_one = os.path.join(DIR_PATH, "best.pth")
+        self.log_file = os.path.join(SAVE_PATH, "latest.pth")
+        self.best_one = os.path.join(SAVE_PATH, "best.pth")
+        
         # initialize config file
         self.config_file = os.path.join(DIR_PATH, "config.yaml")
 
@@ -34,6 +41,8 @@ class PPOAgent:
         self.policy_clip = self.config["clip_epsilon"]
         self.value_clip = self.config["clip_epsilon"]
         self.batch_size = self.config["batch_size"]
+        self.max_grad_norm = self.config["max_grad_norm"]
+
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -42,17 +51,13 @@ class PPOAgent:
         self.critic = Critic(in_dim=n_inputs).to(self.device)
 
         # Initialize Rollout Buffer
-        self.memory = RolloutBuffer(obs_dim=n_inputs, act_dim=n_actions, batch_size=32)
+        self.memory = RolloutBuffer(obs_dim=n_inputs, act_dim=n_actions, batch_size=self.batch_size)
 
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
 
         # total_steps
         self.total_step = 0
-        
-        # state
-        self.last_state = None
-        self.last_done = None
 
         self._try_load_checkpoint()
 
@@ -85,7 +90,8 @@ class PPOAgent:
                     self.actor.load_state_dict(checkpoint["actor_state"])
                     self.critic.load_state_dict(checkpoint["critic_state"])
                     return
-                except Exception:
+                except Exception as e:
+                    print(f"Failed to load checkpoint\n")
                     continue
     #=====  =====#
     def forward_pass(self, state, action=None, eps=1e-6):
@@ -100,17 +106,13 @@ class PPOAgent:
     #=====  =====#
     def select_action(self, state):
         # convert to torch if state is a numpy array
-        if isinstance(state, np.ndarray):
-            state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-        else:
-            state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.no_grad():
             action, log_prob, value, _ = self.forward_pass(state)
-            action = torch.tanh(action)
-        return (action.squeeze(0).detach().cpu().numpy(), log_prob.squeeze(0).detach().cpu().numpy(), value.squeeze(0).detach().cpu().numpy())
+        return (action.squeeze(0).cpu().numpy(), log_prob.squeeze(0).cpu().numpy(), value.squeeze(0).cpu().numpy())
     #=====  =====#
-    def calculate_advantage_gae(self):
+    def calculate_advantage_gae(self, last_obs=None):
         # get raw data from rollout buffer
         _, _, values, rewards, _, dones = self.memory.get_raw_data()
         values = values.view(-1)
@@ -122,31 +124,30 @@ class PPOAgent:
         gae = torch.as_tensor(0.0, dtype=torch.float32, device=self.device)
         advantages = torch.zeros(T, dtype=torch.float32, device=self.device)
 
-        # calculate the bootstrap value of the last trajectory
-        self.last_done = dones[-1]
-        if bool(self.last_done) or (self.last_state is None):
+        # Bootstrap value for the state after the last stored transition
+        # if the last transition was terminal, or we have no next state, bootstrap = 0
+        if bool(dones[-1]) or last_obs is None:
             next_value = torch.tensor(0.0, device=self.device)
         else:
             with torch.no_grad():
-                self.last_state = torch.as_tensor(self.last_state, dtype=torch.float32, device=self.device)
-                next_value = self.critic(self.last_state).to(self.device)
+                obs_t = torch.as_tensor(last_obs, dtype=torch.float32, device=self.device)
+                next_value = self.critic(obs_t).squeeze()
 
         for t in reversed(range(T)):
             mask = 1 - dones[t]
             if t == T-1:
-                next_value = next_value.reshape(-1)[0]
+                nv = next_value
             else:
-                next_value = values[t+1]
+                nv = values[t+1]
 
-            td_residual = rewards[t] + self.gamma * next_value * mask - values[t]
+            td_residual = rewards[t] + self.gamma * nv * mask - values[t]
             at_gae = td_residual + self.gamma * self.gae_lambda * mask * gae
             advantages[t] = at_gae
-            gae = at_gae
 
         returns = advantages + values
         return advantages, returns
     #=====  =====#
-    def ppo_update(self):
+    def ppo_update(self, last_obs=None):
         states, actions, values, rewards, log_probs, dones, batches = self.memory.generate_batches()
         
         states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
@@ -154,7 +155,7 @@ class PPOAgent:
         log_probs = torch.as_tensor(log_probs, dtype=torch.float32, device=self.device).view(-1)
         values = torch.as_tensor(values, dtype=torch.float32, device=self.device).view(-1)
 
-        advantages, returns = self.calculate_advantage_gae()
+        advantages, returns = self.calculate_advantage_gae(last_obs)
         advantages = advantages.detach()
         returns = returns.detach()
         
@@ -178,8 +179,7 @@ class PPOAgent:
                 surr1 = r * advantage
                 surr2 = torch.clamp(r, 1-self.policy_clip, 1+self.policy_clip) * advantage
                 
-                actor_loss = -torch.min(surr1, surr2).mean() # gradient ascent
-                actor_loss = actor_loss - self.entropy_coef * entropy
+                actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy # gradient ascent
                 critic_loss = nn.MSELoss()(value.squeeze(-1), ret)
 
                 epoch_actor_losses.append(actor_loss.item())
@@ -187,10 +187,12 @@ class PPOAgent:
 
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.actor_optimizer.step()
                 
                 self.critic_optimizer.zero_grad()
                 critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.critic_optimizer.step()
         
         self.memory.reset()
