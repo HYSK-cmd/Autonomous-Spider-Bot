@@ -23,7 +23,9 @@ class Actor(nn.Module):
     
     def forward(self, state) -> torch.Tensor:
         mean = self.actor(state)
-        std = torch.exp(self.log_std)
+        # std = torch.exp(self.log_std)
+        log_std = torch.clamp(self.log_std, min=-2.0, max=1.0) ######
+        std = torch.exp(log_std) ######
         dist = Normal(mean, std)
         return dist
 

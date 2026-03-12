@@ -34,6 +34,8 @@ class PPOAgent:
 
         # Variables
         self.lr = self.config["learning_rate"]
+        self.actor_lr = self.config.get("actor_learning_rate", self.lr) ######
+        self.critic_lr = self.config.get("critic_learning_rate", self.lr) ######
         self.gamma = self.config["gamma"]
         self.gae_lambda = self.config["gae_lambda"]
         self.epochs = self.config["n_epochs"]
@@ -42,6 +44,8 @@ class PPOAgent:
         self.value_clip = self.config["clip_epsilon"]
         self.batch_size = self.config["batch_size"]
         self.max_grad_norm = self.config["max_grad_norm"]
+        self.target_kl = self.config.get("target_kl", 0.02) ######
+        self.log_ratio_clip = self.config.get("log_ratio_clip", 10.0) ######
 
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,9 +57,11 @@ class PPOAgent:
         # Initialize Rollout Buffer
         self.memory = RolloutBuffer(obs_dim=n_inputs, act_dim=n_actions, batch_size=self.batch_size)
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
-
+        # self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        # self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.actor_lr) ######
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.critic_lr) ######
+ 
         # total_steps
         self.total_step = 0
 
@@ -143,6 +149,7 @@ class PPOAgent:
             td_residual = rewards[t] + self.gamma * nv * mask - values[t]
             at_gae = td_residual + self.gamma * self.gae_lambda * mask * gae
             advantages[t] = at_gae
+            gae = at_gae
 
         returns = advantages + values
         return advantages, returns
@@ -166,6 +173,7 @@ class PPOAgent:
         epoch_critic_losses = []
 
         for _ in range(self.epochs):
+            epoch_kls = [] ######
             for idx in batches:
                 state = states[idx]
                 action = actions[idx]
@@ -175,12 +183,18 @@ class PPOAgent:
 
                 _, new_log_prob, value, entropy = self.forward_pass(state, action)
 
-                r = torch.exp(new_log_prob - old_log_prob.detach())
+                # r = torch.exp(new_log_prob - old_log_prob.detach())
+                log_ratio = new_log_prob - old_log_prob.detach()
+                clipped_log_ratio = torch.clamp(log_ratio, -self.log_ratio_clip, self.log_ratio_clip) ######
+                r = torch.exp(clipped_log_ratio) ######
                 surr1 = r * advantage
                 surr2 = torch.clamp(r, 1-self.policy_clip, 1+self.policy_clip) * advantage
                 
                 actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy # gradient ascent
                 critic_loss = nn.MSELoss()(value.squeeze(-1), ret)
+
+                approx_kl = (old_log_prob.detach() - new_log_prob).mean().item() ######
+                epoch_kls.append(approx_kl) ######
 
                 epoch_actor_losses.append(actor_loss.item())
                 epoch_critic_losses.append(critic_loss.item())
@@ -194,6 +208,9 @@ class PPOAgent:
                 critic_loss.backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.critic_optimizer.step()
+
+            if epoch_kls and np.mean(epoch_kls) > self.target_kl:
+                break
         
         self.memory.reset()
         return np.mean(epoch_actor_losses), np.mean(epoch_critic_losses)

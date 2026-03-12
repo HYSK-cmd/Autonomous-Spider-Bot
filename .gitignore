@@ -2,7 +2,6 @@
 .env/
 venv/
 pytorch tutorial/
-videos/
 ddpg.ipynb
 __pycache__/
 *.pyc

@@ -25,18 +25,28 @@ input_dims = env.observation_space.shape[0]
 n_actions = env.action_space.shape[0]
 
 #===== Initialize PPOAgent =====#
+# Disable automatic checkpoint loading for a fresh run every time.
+PPOAgent._try_load_checkpoint = lambda self: None
 agent = PPOAgent(n_inputs=input_dims, n_actions=n_actions)
 
 # Force-load BEST checkpoint explicitly
-best_ckpt = agent.best_one  # src/logs/best.pth
-checkpoint = torch.load(best_ckpt, map_location=agent.device)
-agent.actor.load_state_dict(checkpoint["actor_state"])
-agent.critic.load_state_dict(checkpoint["critic_state"])
+# best_ckpt = agent.best_one  # src/logs/best.pth
+# checkpoint = torch.load(best_ckpt, map_location=agent.device)
+# agent.actor.load_state_dict(checkpoint["actor_state"])
+# agent.critic.load_state_dict(checkpoint["critic_state"])
 
-train = False
+train = True #False
 episode, episode_reward = 0, 0
 reward_history = []
 best_mean_reward = -np.inf
+actor_loss_mean, critic_loss_mean = [], []
+
+# save actor/critic loss metrics
+METRICS_FILE = "actor_critic_loss.txt"
+
+def log_episode_metrics(ep, actor_loss, critic_loss):
+    with open(METRICS_FILE, "a") as f:
+        f.write(f"Episode {ep}: actor_loss={actor_loss:.2f} critic_loss={critic_loss:.2f}\n")
 
 #===== Start Training =====#
 for i in range(TOTAL_TIMESTEPS):
@@ -56,16 +66,17 @@ for i in range(TOTAL_TIMESTEPS):
         mean_reward = np.mean(recent)
 
         log_episode_reward(episode, episode_reward, mean_reward)
-        if mean_reward > best_mean_reward and train and len(reward_history) >= 10:
-            best_mean_reward = mean_reward
-            agent.save_best_checkpoint()
+        # if mean_reward > best_mean_reward and train and len(reward_history) >= 10:
+        #     best_mean_reward = mean_reward
+        #     agent.save_best_checkpoint()
         
         if train:
-            agent.ppo_update()
+            actor_loss, critic_loss = agent.ppo_update()
+            log_episode_metrics(episode, actor_loss, critic_loss)
 
         if episode % 10 == 0 and train:
             print(f"EPISODE: {episode}")
-            agent.save_checkpoint()
+            #agent.save_checkpoint()
 
         obs, info = env.reset()
         episode_reward = 0.0
