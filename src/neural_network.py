@@ -4,13 +4,14 @@ from torch.distributions import Normal
 import numpy as np
 import os
 
-DIR_PATH = os.path.dirname(os.path.abspath(__file__))
+DIR_PATH   = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(DIR_PATH, "..", "test", "models")
 
 class Actor(nn.Module):
     def __init__(self, in_dim:int, out_dim:int, hidden_size:int=256):
         super(Actor, self).__init__()
         
-        self.checkpoint_file = os.path.join(DIR_PATH, "actor_torch_ppo.pth")
+        self.checkpoint_file = os.path.join(MODELS_DIR, "actor_torch_ppo.pth")
         self.actor = nn.Sequential(
             nn.Linear(in_dim, hidden_size),
             nn.ReLU(),
@@ -24,8 +25,8 @@ class Actor(nn.Module):
     def forward(self, state) -> torch.Tensor:
         mean = self.actor(state)
         # std = torch.exp(self.log_std)
-        log_std = torch.clamp(self.log_std, min=-2.0, max=1.0) ######
-        std = torch.exp(log_std) ######
+        log_std = torch.clamp(self.log_std, min=-2.0, max=1.0)
+        std = torch.exp(log_std)
         dist = Normal(mean, std)
         return dist
 
@@ -33,13 +34,13 @@ class Actor(nn.Module):
         torch.save(self.state_dict(), self.checkpoint_file)
 
     def load_checkpoint(self):
-        self.load_state_dict(torch.load(self.checkpoint_file))
+        self.load_state_dict(torch.load(self.checkpoint_file, weights_only=True))
 
 class Critic(nn.Module):
     def __init__(self, in_dim:int, hidden_size:int=256, std:float=0.0):
         super(Critic, self).__init__()
 
-        self.checkpoint_file = os.path.join(DIR_PATH, "critic_torch_ppo.pth")
+        self.checkpoint_file = os.path.join(MODELS_DIR, "critic_torch_ppo.pth")
         self.critic = nn.Sequential(
             nn.Linear(in_dim, hidden_size),
             nn.ReLU(),
@@ -55,4 +56,4 @@ class Critic(nn.Module):
         torch.save(self.state_dict(), self.checkpoint_file)
 
     def load_checkpoint(self):
-        self.load_state_dict(torch.load(self.checkpoint_file))
+        self.load_state_dict(torch.load(self.checkpoint_file, weights_only=True))

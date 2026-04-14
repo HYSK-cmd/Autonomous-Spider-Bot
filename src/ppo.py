@@ -11,13 +11,9 @@ import random
 import os, sys
 import yaml
 #===== Initialize SAVE LOG PATH =====#
-DIR_PATH = os.path.dirname(os.path.abspath(__file__))
-try:
-    LOG_PATH = os.path.join(DIR_PATH, "logs")
-    os.makedirs(LOG_PATH, exist_ok=True)
-    SAVE_PATH = os.path.join(DIR_PATH, LOG_PATH)
-except OSError as e:
-    print(f"Failed creating a directory\n")
+DIR_PATH  = os.path.dirname(os.path.abspath(__file__))
+SAVE_PATH = os.path.join(DIR_PATH, "..", "test", "models")
+os.makedirs(SAVE_PATH, exist_ok=True)
 
 #===== PPOAgent =====#
 class PPOAgent:
@@ -115,8 +111,17 @@ class PPOAgent:
         state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.no_grad():
-            action, log_prob, value, _ = self.forward_pass(state)
-        return (action.squeeze(0).cpu().numpy(), log_prob.squeeze(0).cpu().numpy(), value.squeeze(0).cpu().numpy())
+            dist = self.actor(state)
+            raw_action = dist.rsample()
+            log_prob = dist.log_prob(raw_action).sum(dim=-1)
+            value = self.critic(state)
+            env_action = torch.tanh(raw_action)  # squash to (-1, 1) for the environment
+
+        env_action_np = env_action.squeeze(0).cpu().numpy()
+        raw_action_np = raw_action.squeeze(0).cpu().numpy()   # stored in memory (pre-tanh)
+        log_prob_np   = log_prob.squeeze(0).cpu().numpy()     # computed in pre-tanh space
+        value_np      = value.squeeze(0).cpu().numpy()
+        return env_action_np, raw_action_np, log_prob_np, value_np
     #=====  =====#
     def calculate_advantage_gae(self, last_obs=None):
         # get raw data from rollout buffer
@@ -155,25 +160,30 @@ class PPOAgent:
         return advantages, returns
     #=====  =====#
     def ppo_update(self, last_obs=None):
-        states, actions, values, rewards, log_probs, dones, batches = self.memory.generate_batches()
-        
-        states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        actions = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
+        states, actions, values, rewards, log_probs, dones, _ = self.memory.generate_batches()
+
+        states    = torch.as_tensor(states,    dtype=torch.float32, device=self.device)
+        actions   = torch.as_tensor(actions,   dtype=torch.float32, device=self.device)
         log_probs = torch.as_tensor(log_probs, dtype=torch.float32, device=self.device).view(-1)
-        values = torch.as_tensor(values, dtype=torch.float32, device=self.device).view(-1)
+        values    = torch.as_tensor(values,    dtype=torch.float32, device=self.device).view(-1)
 
         advantages, returns = self.calculate_advantage_gae(last_obs)
         advantages = advantages.detach()
-        returns = returns.detach()
-        
+        returns    = returns.detach()
+
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        N = states.shape[0]
 
         # for record
         epoch_actor_losses = []
         epoch_critic_losses = []
 
         for _ in range(self.epochs):
-            epoch_kls = [] ######
+            epoch_kls = []
+            # Re-shuffle every epoch so each epoch sees a different mini-batch composition
+            indices = torch.randperm(N, device=self.device)
+            batches = [indices[i:i+self.batch_size] for i in range(0, N, self.batch_size)]
             for idx in batches:
                 state = states[idx]
                 action = actions[idx]

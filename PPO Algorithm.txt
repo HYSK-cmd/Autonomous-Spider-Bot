@@ -1,0 +1,28 @@
+step 1: Initialize Actor Network
+step 2: Initialize Critic Network
+step 3: Collect a batch of trajectories
+	state, action, log(prob), reward, value, RTG
+step 4: Rewards To Go (RTG)
+	RTG =rt + yrt+1 + y^2rt+2 + ...
+step 5: Calculate Advantages
+	rt + gamma*gae*rt+1 + ...
+	δt​=rt​+γV(st+1​)⋅(1−donet​)-V(st​)
+step 6: Optimize Critic Network
+	loss = 1/n sigma(i=1 to n) (yi-yhati)^2
+	n = # of trajectories	
+	yi = RTG, yhati = estimated value
+step 7: Optimize Actor Network
+	PPO Clip Objective Function
+	E[min(rt(theta)At, clip(rt(theta), 1-e, 1+e)At)]
+	r = action probability of the current network/action probability of the old network
+	r = e^(log(cur)-log(old))
+	e = clip policy ~ 0.2
+	clip -> i.e) (0.8 <= r <= 1.2)At
+	E[] -> (sum of the whole trajectories).mean()
+	-Lclip(theta) -> gradient ascent -> maximize reward
+step 8: Optimize Actor-Critic Network
+	Repeat step 6 & 7 for n times
+
+step 9: Run again
+	Repeat step 3-8
+	

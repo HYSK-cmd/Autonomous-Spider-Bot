@@ -268,17 +268,8 @@ def main():
         for _ in range(args.total_timesteps):
             state = obs
             if algo_name == "ppo":
-                raw_action, log_prob, value = agent.select_action(state)
-                action = np.clip(raw_action, env.action_space.low, env.action_space.high)
-
-                # Use the executed action for stored on-policy data.
-                if args.train:
-                    state_t = torch.as_tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
-                    action_t = torch.as_tensor(action, dtype=torch.float32, device=agent.device).unsqueeze(0)
-                    with torch.no_grad():
-                        _, log_prob_t, value_t, _ = agent.forward_pass(state_t, action_t)
-                    log_prob = float(log_prob_t.squeeze(0).cpu().item())
-                    value = float(value_t.squeeze(0).cpu().item())
+                action, raw_action, log_prob, value = agent.select_action(state)
+                # action is tanh-squashed to (-1, 1); raw_action is stored in memory
             else:
                 action, action_for_buffer = agent.select_action(
                     state,
