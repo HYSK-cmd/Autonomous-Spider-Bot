@@ -17,36 +17,62 @@ for _p in (_SIM_DIR, _PROJECT_ROOT):
         sys.path.insert(0, _p)
 
 import numpy as np
+import torch
 from spider_env_new import SpiderEnv
 from src.ppo import PPOAgent
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TOTAL_STEPS   = 1_000_000   # how many env steps to train for in total
+TOTAL_STEPS   = 1_000_000  # how many env steps to train for in total
+ROLLOUT_STEPS = 1024        # PPO update every N env steps (fixed rollout horizon)
 SAVE_INTERVAL = 10          # save model weights every N episodes
 LOG_FILE      = os.path.join(_SIM_DIR, "reward_log.txt")
-train = False  # set to True to train, False to just run with saved weights
+train = True  # set to True to train, False to just run with saved weights
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
-env    = SpiderEnv(render_mode="human")
+env    = SpiderEnv(render_mode=None)
 obs, _ = env.reset()
 
-if not train:
-    # Auto-loads best/latest checkpoint inside __init__ — no extra call needed
-    agent = PPOAgent(n_inputs=env.observation_space.shape[0],
-                     n_actions=env.action_space.shape[0])
+# Disable auto-loading so we control exactly which checkpoint is used
+PPOAgent._try_load_checkpoint = lambda self: None
+agent = PPOAgent(n_inputs=env.observation_space.shape[0],
+                 n_actions=env.action_space.shape[0])
+
+if train:
+    if os.path.exists(agent.log_file):
+        agent.load_checkpoint()
+        print("Resumed from latest.pth")
 else:
-    # Disable auto-loading so training always starts from scratch
-    PPOAgent._try_load_checkpoint = lambda self: None
-    agent = PPOAgent(n_inputs=env.observation_space.shape[0],
-                     n_actions=env.action_space.shape[0])
+    # Evaluate using best.pth
+    if os.path.exists(agent.best_one):
+        ck = torch.load(agent.best_one, map_location=agent.device, weights_only=True)
+        agent.actor.load_state_dict(ck["actor_state"])
+        agent.critic.load_state_dict(ck["critic_state"])
+        print(f"Loaded best.pth")
 
 # ── Training loop ─────────────────────────────────────────────────────────────
-episode        = 0
+# Resume episode count and best mean reward from log if it exists
+episode = 0
+best_mean_reward = float("-inf")
+if os.path.exists(LOG_FILE):
+    with open(LOG_FILE, "r") as f:
+        for line in f:
+            try:
+                ep_num = int(line.split()[0].split("=")[1])
+                episode = ep_num
+                for token in line.split():
+                    if token.startswith("mean100="):
+                        val = float(token.split("=")[1])
+                        if val > best_mean_reward:
+                            best_mean_reward = val
+            except Exception:
+                pass
+
 episode_reward = 0.0
 episode_length = 0
 reward_history    = []
 length_history    = []
 collision_history = []
+actor_loss, critic_loss = float("nan"), float("nan")
 
 for step in range(TOTAL_STEPS):
 
@@ -59,6 +85,11 @@ for step in range(TOTAL_STEPS):
 
     # raw_action (pre-tanh) stored in memory — consistent with how log_prob was computed
     agent.memory.store(current_obs, raw_action, value, reward, log_prob, done)
+
+    # Fixed rollout update — every ROLLOUT_STEPS regardless of episode boundary
+    if train and (step + 1) % ROLLOUT_STEPS == 0:
+        last_obs = None if done else obs   # bootstrap=0 if terminal, else V(obs)
+        actor_loss, critic_loss = agent.ppo_update(last_obs=last_obs)
 
     if done:
         episode   += 1
@@ -73,11 +104,7 @@ for step in range(TOTAL_STEPS):
         mean_length    = np.mean(length_history[-100:])
         collision_rate = np.mean(collision_history[-100:]) * 100.0
 
-        if train:
-            # Episode ended → terminal, so last_obs bootstrap = None (value = 0)
-            actor_loss, critic_loss = agent.ppo_update(last_obs=None)
-        else:
-            actor_loss, critic_loss = float("nan"), float("nan")
+        if not train:
             agent.memory.reset()   # discard rollout in eval mode
 
         with open(LOG_FILE, "a") as f:
@@ -94,6 +121,10 @@ for step in range(TOTAL_STEPS):
                 f"  c_loss={critic_loss:.4f}"
                 f"\n"
             )
+
+        if train and mean_reward > best_mean_reward:
+            best_mean_reward = mean_reward
+            agent.save_best_checkpoint()
 
         if episode % SAVE_INTERVAL == 0:
             print(
