@@ -73,7 +73,7 @@ pip install -r requirements.txt
 The PPO policy receives a 377 dimensional observation
 
 | Input | Dimensions | Description |
-|---|:---:|---|
+|:---:|:---:|---|
 | LiDAR | 360 | One distance measurement per degree |
 | Joint positions | 12 | Current servo joint angles |
 | IMU | 5 | Roll, pitch, yaw rate, cosine of yaw, and sine of yaw |
@@ -83,10 +83,14 @@ The PPO policy produces 12 continuous actions in the range `[-1, 1]`.
 Each action represents a residual joint-angle correction added to the
 baseline CPG gait.
 
-## Hardware Setup (reference)
+## Hardware Setup (Use these links as a reference)
 ### Servo Motor Setup
 https://youtu.be/RnGUTny1hG8?si=mq7sOZ-3lBW69IH0 
 ### Lidar Setup
 https://www.instructables.com/Getting-Started-With-the-Low-cost-RPLIDAR-Using-Je/
 ### IMU Setup
 https://automaticaddison.com/visualize-imu-data-using-the-mpu6050-ros-and-jetson-nano/
+### PPO Algorithm
+https://youtu.be/8jtAzxUwDj0?si=NiN2cJe0PG6mwH6z
+### PPO Equations
+go to ~/ppo_equation/
