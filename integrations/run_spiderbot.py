@@ -20,27 +20,21 @@ from adafruit_servokit import ServoKit
 from rplidar import RPLidar
 from math import atan2, sqrt, sin, cos, pi
 
-# ── import ActorNetwork from simulation so architecture stays in sync ─────────
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "simulation"))
-from agent import ActorNetwork
+# import Actor from src so architecture stays in sync with training
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from src.neural_network import Actor
 
-# ═══════════════════════════════════════════════════════════════
-#  DEVICE  (Jetson Orin Nano — CUDA if available, else CPU)
-# ═══════════════════════════════════════════════════════════════
+# DEVICE
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Running on: {device}")
 
-# ═══════════════════════════════════════════════════════════════
-#  HARDWARE INIT
-# ═══════════════════════════════════════════════════════════════
-kit   = ServoKit(channels=16)
-i2c   = busio.I2C(board.SCL, board.SDA)
-mpu   = adafruit_mpu6050.MPU6050(i2c)
-lidar = RPLidar('/dev/ttyUSB0')   # run `ls /dev/ttyUSB*` to confirm port
+# HARDWARE INITIALIZATION
+kit = ServoKit(channels=16)
+i2c = busio.I2C(board.SCL, board.SDA)
+mpu = adafruit_mpu6050.MPU6050(i2c)
+lidar = RPLidar('/dev/ttyUSB0')
 
-# ═══════════════════════════════════════════════════════════════
-#  SERVO CONFIG  (DS3218 — 270° range)
-# ═══════════════════════════════════════════════════════════════
+# SERVO CONFIG (DS3218 — 270° range)
 ANGLE_MIN = 0
 ANGLE_MAX = 270
 ANGLE_MID = 135     # neutral midpoint (maps to 0 rad in obs)
@@ -54,9 +48,7 @@ LEGS = {
     "back_left":   {"coxa": 6,  "femur": 7,  "tibia": 8},
     "back_right":  {"coxa": 9,  "femur": 10, "tibia": 11},
 }
-
 current_angles = np.full(NUM_MOTORS, ANGLE_MID, dtype=np.float32)
-
 
 def apply_action(action: np.ndarray):
     """
@@ -80,34 +72,28 @@ def stand():
     apply_action(np.zeros(NUM_MOTORS))
     time.sleep(0.5)
 
-
-# ═══════════════════════════════════════════════════════════════
-#  PPO ACTOR
-#  Loaded directly from simulation/agent.py — architecture stays
-#  in sync with whatever was trained, no manual duplication.
-# ═══════════════════════════════════════════════════════════════
+# PPO ACTOR
+# Loaded directly from simulation/agent.py — architecture stays
+# in sync with whatever was trained, no manual duplication.
 OBS_DIM    = 377
 ACTION_DIM = 12
-WEIGHTS    = os.path.join(os.path.dirname(__file__), "..", "simulation", "tmp", "ppo", "actor_torch_ppo_2")
+WEIGHTS    = os.path.join(os.path.dirname(__file__), "..", "test", "models", "best.pth")
 
-actor = ActorNetwork(n_actions=ACTION_DIM, input_dims=[OBS_DIM], alpha=0.0)
-actor.load_checkpoint()   # loads from actor.checkpoint_file = WEIGHTS path set in ActorNetwork
+actor = Actor(in_dim=OBS_DIM, out_dim=ACTION_DIM).to(device)
+checkpoint = torch.load(WEIGHTS, map_location=device, weights_only=True)
+actor.load_state_dict(checkpoint["actor_state"])
 actor.eval()
-
 
 def predict(obs: np.ndarray) -> np.ndarray:
     """Run the actor deterministically (mean action, then tanh-squash)."""
     with torch.no_grad():
-        t    = torch.FloatTensor(obs).unsqueeze(0).to(device)
+        t = torch.FloatTensor(obs).unsqueeze(0).to(device)
         dist = actor(t)
         # use the mean for deterministic inference — no sampling noise at deploy time
         action = torch.tanh(dist.mean)
         return action.squeeze(0).cpu().numpy()
 
-
-# ═══════════════════════════════════════════════════════════════
-#  IMU CALIBRATION
-# ═══════════════════════════════════════════════════════════════
+# IMU CALIBRATION
 def calibrate_gyro(samples=100, delay=0.01):
     """
     Bot must be completely still during this phase.
@@ -123,18 +109,14 @@ def calibrate_gyro(samples=100, delay=0.01):
     print(f"Bias → gx:{bias[0]:.4f}  gy:{bias[1]:.4f}  gz:{bias[2]:.4f}")
     return bias
 
+# OBSERVATION BUILDERS
+# Must match _get_observation() in spider_env_new.py exactly.
 
-# ═══════════════════════════════════════════════════════════════
-#  OBSERVATION BUILDERS
-#  Must match _get_observation() in spider_env_new.py exactly.
-# ═══════════════════════════════════════════════════════════════
-
-# — IMU state ——————————————————————————————————————————————————
+# IMU STATE
 YAW_RATE_CLIP = 5.0   # rad/s — matches spider_env_new.py
 
 yaw    = 0.0
 last_t = time.monotonic()
-
 
 def get_imu_obs() -> np.ndarray:
     """
@@ -154,23 +136,21 @@ def get_imu_obs() -> np.ndarray:
     roll  = atan2(ay, az)
     pitch = atan2(-ax, sqrt(ay*ay + az*az))
 
-    now    = time.monotonic()
-    dt     = now - last_t
+    now = time.monotonic()
+    dt = now - last_t
     last_t = now
-    yaw   += gz * dt
+    yaw += gz * dt
 
-    roll_n     = roll  / pi
-    pitch_n    = pitch / pi
+    roll_n = roll / pi
+    pitch_n = pitch / pi
     yaw_rate_n = float(np.clip(gz, -YAW_RATE_CLIP, YAW_RATE_CLIP)) / YAW_RATE_CLIP
 
     return np.array([roll_n, pitch_n, yaw_rate_n, cos(yaw), sin(yaw)], dtype=np.float32)
 
-
-# — LiDAR ——————————————————————————————————————————————————————
+# LIDAR
 LIDAR_MAX_M = 5.0       # metres — matches MAX_LIDAR in spider_env_new.py
 LIDAR_MAX_MM = 12000    # RPLidar A1M8 hardware max in mm
 BINS = 360
-
 
 def get_lidar_obs() -> np.ndarray:
     """
@@ -187,8 +167,7 @@ def get_lidar_obs() -> np.ndarray:
         break
     return arr
 
-
-# — Joints ——————————————————————————————————————————————————————
+# JOINTS
 def get_joint_obs() -> np.ndarray:
     """
     12D array of current servo angles in radians, centred at 0.
@@ -198,7 +177,7 @@ def get_joint_obs() -> np.ndarray:
     return ((current_angles - ANGLE_MID) * (pi / 180.0)).astype(np.float32)
 
 
-# — Full observation ————————————————————————————————————————————
+# FULL OBSERVATIONS
 def get_observation() -> np.ndarray:
     """
     Full 377D obs vector matching spider_env_new.py _get_observation():
@@ -210,35 +189,27 @@ def get_observation() -> np.ndarray:
     assert obs.shape == (377,), f"Obs shape mismatch: {obs.shape}"
     return obs
 
-
-# ═══════════════════════════════════════════════════════════════
 #  SHUTDOWN
-# ═══════════════════════════════════════════════════════════════
 def shutdown():
     print("Shutting down...")
     stand()
-    lidar.stop()
-    lidar.stop_motor()
-    lidar.disconnect()
+    # lidar.stop()
+    # lidar.stop_motor()
+    # lidar.disconnect()
 
-
-# ═══════════════════════════════════════════════════════════════
 #  MAIN
-# ═══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     try:
         print("Warming up IMU (30s)...")
         time.sleep(30)
-
         stand()
         gyro_bias = calibrate_gyro()
-
         print("Starting control loop at 50 Hz...")
         while True:
-            obs    = get_observation()   # 377D
-            action = predict(obs)        # 12D, values in [-1, 1]
+            obs = get_observation()   # 377D
+            action = predict(obs) # 12D, values in [-1, 1]
             apply_action(action)
-            time.sleep(0.02)             # 50 Hz
+            time.sleep(0.02) # 50 Hz
 
     except KeyboardInterrupt:
         shutdown()

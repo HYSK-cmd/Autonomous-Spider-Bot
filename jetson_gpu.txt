@@ -1,0 +1,6 @@
+cat /etc/nv_tegra_release
+
+wget url
+
+pip3 install torch-*.whl
+python3 -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"

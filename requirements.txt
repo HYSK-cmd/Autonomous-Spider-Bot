@@ -4,3 +4,7 @@ PyYAML
 gymnasium[box2d]
 matplotlib
 pybullet
+adafruit-blinka # board, busio
+adafruit-circuitpython-mpu6050 # IMU over I2C
+adafruit-circuitpython-servokit # PCA9685 servo driver
+rplidar-roboticia # RPLidar A1M8
