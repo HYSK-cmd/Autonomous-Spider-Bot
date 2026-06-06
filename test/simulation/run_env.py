@@ -76,15 +76,27 @@ actor_loss, critic_loss = float("nan"), float("nan")
 
 for step in range(TOTAL_STEPS):
 
-    env_action, raw_action, log_prob, value = agent.select_action(obs)
+    # Training samples actions for exploration; evaluation matches deployment by
+    # using the policy mean deterministically.
+    env_action, raw_action, log_prob, value = agent.select_action(
+        obs, deterministic=not train
+    )
     current_obs = obs   # obs_t — log_prob/value were computed here
     obs, reward, terminated, truncated, info = env.step(env_action)
     episode_reward += reward
     episode_length += 1
     done = terminated or truncated
 
+    # A timeout is an artificial episode boundary, not a terminal state. Add the
+    # final state's discounted value before cutting the GAE chain at the reset.
+    # This avoids both treating timeout as failure and leaking advantage estimates
+    # into the next episode's reset state.
+    learning_reward = reward
+    if truncated and not terminated:
+        learning_reward += agent.gamma * agent.estimate_value(obs)
+
     # raw_action (pre-tanh) stored in memory — consistent with how log_prob was computed
-    agent.memory.store(current_obs, raw_action, value, reward, log_prob, done)
+    agent.memory.store(current_obs, raw_action, value, learning_reward, log_prob, done)
 
     # Fixed rollout update — every ROLLOUT_STEPS regardless of episode boundary
     if train and (step + 1) % ROLLOUT_STEPS == 0:

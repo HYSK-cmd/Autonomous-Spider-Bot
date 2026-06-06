@@ -170,8 +170,9 @@ OBSTACLE_WEIGHT      = 5.0    # mild background proximity signal — approach+da
 # EXP_K=3.5 → more linear early gradient so the robot gets a clear "start evading" signal
 # from the outer edge of the safe zone, not just the final approach.
 EXP_K                = 3.5
-# COLLISION_PENALTY must dominate the maximum possible accumulated episode reward.
-COLLISION_PENALTY    = -10000.0
+# Collision ends the episode, so it does not need an extreme -10000 target.
+# A smaller terminal target plus Huber critic loss is substantially more stable.
+COLLISION_PENALTY    = -1000.0
 FALL_PENALTY         = -5.0   # terminal penalty for tipping over
 
 # Lateral evasion reward — rewards velocity *away* from each hazard.
@@ -282,8 +283,7 @@ class SpiderEnv(gym.Env):
     Each episode lasts at most MAX_STEPS steps (truncated=True at the limit).
     It ends early (terminated=True) only if the robot falls over.
     Reaching x >= 5.0 m ends the episode with a large bonus.
-    Hitting an obstacle is penalised but does NOT end the episode — the robot
-    must learn to walk around things, not just avoid the first one.
+    Hitting an obstacle or wall ends the episode with a collision penalty.
     """
     metadata = {"render_modes": ["human"]}
 
@@ -526,6 +526,18 @@ class SpiderEnv(gym.Env):
         _, orn = p.getBasePositionAndOrientation(self.robot_id)
         roll, pitch, _ = p.getEulerFromQuaternion(orn)
         return abs(roll) > FALL_ANGLE_RAD or abs(pitch) > FALL_ANGLE_RAD
+
+    def _detect_collision(self) -> tuple[bool, bool]:
+        """Return obstacle/wall contact flags for the current physics state."""
+        collided_obstacle = any(
+            p.getContactPoints(self.robot_id, obs_id)
+            for obs_id in self.obstacle_ids
+        )
+        collided_wall = any(
+            p.getContactPoints(self.robot_id, wall_id)
+            for wall_id in self.wall_ids
+        )
+        return collided_obstacle, collided_wall
 
     # ── CPG gait ──────────────────────────────────────────────────────────────
 
@@ -907,8 +919,17 @@ class SpiderEnv(gym.Env):
         #    This makes each agent decision cover ~33 ms of real simulation
         #    instead of just 4 ms, so the robot moves meaningful distance
         #    per step and MAX_STEPS episodes last ~33 seconds.
+        # Contact can begin and end between agent observations. Accumulate contact
+        # across substeps so a brief collision cannot disappear before detection.
+        collided_obstacle = False
+        collided_wall = False
         for _ in range(PHYSICS_SUBSTEPS):
             p.stepSimulation()
+            obstacle_contact, wall_contact = self._detect_collision()
+            collided_obstacle |= obstacle_contact
+            collided_wall |= wall_contact
+            if collided_obstacle or collided_wall:
+                break
         self.step_count += 1
 
         # 5. Read motor torques after the last substep (used in energy penalty)
@@ -927,15 +948,6 @@ class SpiderEnv(gym.Env):
         # 8. Check termination / truncation
         terminated = False
         truncated  = False
-
-        collided_obstacle = any(
-            p.getContactPoints(self.robot_id, obs_id)
-            for obs_id in self.obstacle_ids
-        )
-        collided_wall = any(
-            p.getContactPoints(self.robot_id, wall_id)
-            for wall_id in self.wall_ids
-        )
 
         end_reason    = "running"
         terminal_bonus = 0.0   # applied AFTER clip so large bonuses are not squashed
@@ -978,7 +990,7 @@ class SpiderEnv(gym.Env):
         self._prev_action = action.copy()
 
         # Clip the continuous per-step reward, then add terminal bonuses.
-        # Terminal bonuses must survive the clip: +500 goal and -10000 collision
+        # Terminal bonuses must survive the clip: +500 goal and -1000 collision
         # are intentionally larger than any per-step reward and must remain
         # distinguishable from ordinary good/bad steps.
         reward = float(np.clip(reward, -200.0, 50.0)) + terminal_bonus

@@ -106,13 +106,13 @@ class PPOAgent:
         return action, log_prob, value, entropy
         
     #=====  =====#
-    def select_action(self, state):
+    def select_action(self, state, deterministic=False):
         # convert to torch if state is a numpy array
         state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.no_grad():
             dist = self.actor(state)
-            raw_action = dist.rsample()
+            raw_action = dist.mean if deterministic else dist.rsample()
             log_prob = dist.log_prob(raw_action).sum(dim=-1)
             value = self.critic(state)
             env_action = torch.tanh(raw_action)  # squash to (-1, 1) for the environment
@@ -122,6 +122,12 @@ class PPOAgent:
         log_prob_np   = log_prob.squeeze(0).cpu().numpy()     # computed in pre-tanh space
         value_np      = value.squeeze(0).cpu().numpy()
         return env_action_np, raw_action_np, log_prob_np, value_np
+
+    def estimate_value(self, state) -> float:
+        """Estimate V(state) without building an autograd graph."""
+        state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            return float(self.critic(state).squeeze().item())
     #=====  =====#
     def calculate_advantage_gae(self, last_obs=None):
         # get raw data from rollout buffer
@@ -201,7 +207,9 @@ class PPOAgent:
                 surr2 = torch.clamp(r, 1-self.policy_clip, 1+self.policy_clip) * advantage
                 
                 actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy # gradient ascent
-                critic_loss = nn.MSELoss()(value.squeeze(-1), ret)
+                # Huber loss keeps rare terminal penalties from dominating every
+                # critic update while preserving a useful collision signal.
+                critic_loss = nn.functional.smooth_l1_loss(value.squeeze(-1), ret)
 
                 approx_kl = (old_log_prob.detach() - new_log_prob).mean().item() ######
                 epoch_kls.append(approx_kl) ######
