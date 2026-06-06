@@ -57,6 +57,8 @@ Usage
 import math
 import os
 import random
+import tempfile
+import xml.etree.ElementTree as ET
 
 import gymnasium as gym
 import numpy as np
@@ -380,16 +382,42 @@ class SpiderEnv(gym.Env):
 
     # ── Robot loading ─────────────────────────────────────────────────────────
 
+    def _resolved_urdf_path(self) -> tuple[str, str | None]:
+        """Resolve ROS package mesh URLs for standalone PyBullet execution."""
+        tree = ET.parse(self.urdf_path)
+        package_dir = os.path.dirname(os.path.dirname(os.path.abspath(self.urdf_path)))
+        changed = False
+
+        for mesh in tree.iter("mesh"):
+            filename = mesh.get("filename", "")
+            if not filename.startswith("package://") or "/meshes/" not in filename:
+                continue
+            relative_mesh = filename.split("/meshes/", 1)[1]
+            mesh.set("filename", os.path.join(package_dir, "meshes", relative_mesh))
+            changed = True
+
+        if not changed:
+            return self.urdf_path, None
+
+        with tempfile.NamedTemporaryFile(suffix=".urdf", delete=False) as temp_urdf:
+            tree.write(temp_urdf, encoding="utf-8", xml_declaration=True)
+            return temp_urdf.name, temp_urdf.name
+
     def _load_robot(self):
         # SPAWN_Z: height so feet just contact z=0 in the standing pose.
         # TODO: calibrate once STAND_ANGLES are set.
         SPAWN_Z = 0.20
-        robot_id = p.loadURDF(
-            self.urdf_path,
-            basePosition=[0, 0, SPAWN_Z],
-            useFixedBase=False,
-            flags=p.URDF_USE_MATERIAL_COLORS_FROM_MTL,
-        )
+        load_path, temporary_path = self._resolved_urdf_path()
+        try:
+            robot_id = p.loadURDF(
+                load_path,
+                basePosition=[0, 0, SPAWN_Z],
+                useFixedBase=False,
+                flags=p.URDF_USE_MATERIAL_COLORS_FROM_MTL,
+            )
+        finally:
+            if temporary_path is not None:
+                os.unlink(temporary_path)
         p.changeDynamics(robot_id, -1, linearDamping=0.3, angularDamping=0.3)
 
         # Build a name→index map for all joints in the URDF

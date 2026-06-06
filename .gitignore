@@ -1,4 +1,5 @@
 .venv/
+.conda-env/
 .env/
 venv/
 pytorch tutorial/
